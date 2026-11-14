@@ -20,3 +20,7 @@
 #share-link-area:not(:empty){margin-top:20px}.share-field{font:13px monospace;letter-spacing:0;margin-top:8px}
 
 .code-row{display:flex;align-items:center;justify-content:center;gap:16px}.copy-code{border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);padding:8px 12px;min-height:44px}.copy-code:hover{background:var(--surface-raised,#303030)}.copy-status{min-height:18px;margin-top:6px;color:var(--muted);font-size:12px}.transfer-item{position:relative}.transfer-flight{position:absolute;right:4px;top:12px;color:var(--ink);opacity:0;pointer-events:none}.transfer-flight.flying{animation:flick-away 280ms cubic-bezier(.23,1,.32,1) forwards}@keyframes flick-away{0%{opacity:1;transform:translate(0,0)}100%{opacity:0;transform:translate(18px,-18px)}}@media(prefers-reduced-motion:reduce){.transfer-flight.flying{animation:none}}
+
+.copy-code{display:inline-grid;place-items:center;width:44px;padding:0}.upload.dragging{border-color:var(--ink);background:var(--surface-raised,#303030)}.upload:focus-visible{outline:3px solid var(--lime);outline-offset:4px}
+
+.device-field{font:16px system-ui,sans-serif;letter-spacing:0}.name-back{margin-top:12px}.sender-name{margin:6px 0 16px!important;font-size:14px}

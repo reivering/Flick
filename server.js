@@ -22,9 +22,13 @@ db.exec(`PRAGMA journal_mode=WAL; PRAGMA secure_delete=ON;
  CREATE INDEX IF NOT EXISTS upload_expiry ON uploads(expires);
  CREATE TABLE IF NOT EXISTS shares (token_hash TEXT PRIMARY KEY, file_id TEXT NOT NULL, expires INTEGER NOT NULL);
  CREATE INDEX IF NOT EXISTS share_expiry ON shares(expires);`);
+for (const [table, column] of [['sessions', 'receiver_name'], ['sessions', 'sender_name'], ['files', 'sender_name']]) {
+  if (!db.prepare(`PRAGMA table_info(${table})`).all().some(field => field.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`);
+}
 const DAY = 24 * 60 * 60 * 1000;
 const token = () => randomBytes(32).toString('base64url');
 const digest = value => createHash('sha256').update(value).digest('hex');
+const deviceName = (value, fallback) => typeof value === 'string' ? value.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 40) || fallback : fallback;
 const cleanup = () => {
   const now = Date.now();
   db.prepare('DELETE FROM shares WHERE expires <= ? OR file_id NOT IN (SELECT id FROM files)').run(now);
@@ -64,7 +68,8 @@ app.post('/api/sessions', async (req, res, next) => {
     const id = token(), receiver = token();
     let code;
     do { code = String(randomInt(0, 100000000)).padStart(8, '0'); } while (db.prepare('SELECT 1 FROM sessions WHERE code = ?').get(code));
-    db.prepare('INSERT INTO sessions (id, code, receiver, expires) VALUES (?, ?, ?, ?)').run(id, code, digest(receiver), Date.now() + DAY);
+    const receiverName = deviceName(req.body.receiverName, 'Receiving device');
+    db.prepare('INSERT INTO sessions (id, code, receiver, expires, receiver_name) VALUES (?, ?, ?, ?, ?)').run(id, code, digest(receiver), Date.now() + DAY, receiverName);
     const url = new URL(req.body.origin || '', `${req.protocol}://${req.get('host')}`);
     if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Invalid origin');
     url.pathname = '/'; url.search = ''; url.hash = `join=${code}`;
@@ -82,8 +87,9 @@ app.post('/api/join', (req, res) => {
   const session = db.prepare('SELECT * FROM sessions WHERE code = ? AND expires > ?').get(code, now);
   if (!session) return res.status(404).json({ error: 'That code is invalid or has expired' });
   const sender = token();
-  db.prepare('UPDATE sessions SET sender = ?, connected = 1 WHERE id = ?').run(digest(sender), session.id);
-  res.json({ id: session.id, sender, code });
+  const senderName = deviceName(req.body.senderName, 'Sending device');
+  db.prepare('UPDATE sessions SET sender = ?, sender_name = ?, connected = 1 WHERE id = ?').run(digest(sender), senderName, session.id);
+  res.json({ id: session.id, sender, code, receiverName: session.receiver_name || 'Receiving device', senderName });
 });
 app.get('/api/history', (req, res) => {
   const now = Date.now();
@@ -93,7 +99,7 @@ app.get('/api/history', (req, res) => {
     if (!match) continue;
     const session = db.prepare('SELECT receiver FROM sessions WHERE id = ? AND expires > ?').get(match[1], now);
     if (!session || session.receiver !== digest(match[2])) continue;
-    files.push(...db.prepare('SELECT id, session, name, size, mime, created, expires FROM files WHERE session = ? AND expires > ?').all(match[1], now));
+    files.push(...db.prepare('SELECT id, session, name, size, mime, created, expires, sender_name FROM files WHERE session = ? AND expires > ?').all(match[1], now));
   }
   files.sort((a, b) => b.created - a.created);
   res.json({ files });
@@ -104,9 +110,9 @@ app.get('/api/sessions/:id', (req, res) => {
   const receiver = req.get('Authorization').slice(7);
   res.cookie('flick_' + session.id, receiver, { httpOnly: true, sameSite: 'strict', secure: req.secure, maxAge: DAY });
   const image = db.prepare('SELECT id, created, expires FROM images WHERE session = ? AND expires > ? ORDER BY created DESC LIMIT 1').get(session.id, Date.now());
-  const file = db.prepare('SELECT id, name, size, mime, created, expires FROM files WHERE session = ? AND expires > ? ORDER BY created DESC, rowid DESC LIMIT 1').get(session.id, Date.now());
-  const files = db.prepare('SELECT id, session, name, size, mime, created, expires FROM files WHERE session = ? AND expires > ? ORDER BY created DESC, rowid DESC').all(session.id, Date.now());
-  res.json({ connected: !!session.connected, image: image || null, file: file || null, files });
+  const file = db.prepare('SELECT id, name, size, mime, created, expires, sender_name FROM files WHERE session = ? AND expires > ? ORDER BY created DESC, rowid DESC LIMIT 1').get(session.id, Date.now());
+  const files = db.prepare('SELECT id, session, name, size, mime, created, expires, sender_name FROM files WHERE session = ? AND expires > ? ORDER BY created DESC, rowid DESC').all(session.id, Date.now());
+  res.json({ connected: !!session.connected, senderName: session.sender_name || 'Sending device', image: image || null, file: file || null, files });
 });
 const MAX_FILE_SIZE = 1000 * 1000 * 1000;
 const CHUNK_SIZE = 4 * 1024 * 1024;
@@ -154,7 +160,8 @@ app.put('/api/sessions/:id/uploads/:upload', express.raw({ type: 'application/oc
     const now = Date.now();
     db.exec('BEGIN');
     try {
-      db.prepare('INSERT INTO files VALUES (?, ?, ?, ?, ?, ?, ?)').run(item.id, item.session, item.name, item.size, fileMime(filePath), now, now + DAY);
+      const session = db.prepare('SELECT sender_name FROM sessions WHERE id = ?').get(item.session);
+      db.prepare('INSERT INTO files (id, session, name, size, mime, created, expires, sender_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(item.id, item.session, item.name, item.size, fileMime(filePath), now, now + DAY, session?.sender_name || 'Sending device');
       db.prepare('UPDATE uploads SET expires = ? WHERE id = ?').run(now + DAY, item.id);
       db.prepare('UPDATE sessions SET expires = ? WHERE id = ?').run(now + DAY, item.session);
       db.exec('COMMIT');
@@ -173,7 +180,8 @@ app.post('/api/sessions/:id/files', (req, res) => {
     try {
       const mime = fileMime(req.file.path);
       const now = Date.now(), name = path.basename(req.file.originalname).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 255) || 'file';
-      db.prepare('INSERT INTO files VALUES (?, ?, ?, ?, ?, ?, ?)').run(req.file.filename, req.params.id, name, req.file.size, mime, now, now + DAY);
+      const session = db.prepare('SELECT sender_name FROM sessions WHERE id = ?').get(req.params.id);
+      db.prepare('INSERT INTO files (id, session, name, size, mime, created, expires, sender_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(req.file.filename, req.params.id, name, req.file.size, mime, now, now + DAY, session?.sender_name || 'Sending device');
       db.prepare('UPDATE sessions SET expires = ? WHERE id = ?').run(now + DAY, req.params.id);
       res.json({ id: req.file.filename, expires: now + DAY });
     } catch (err) { fs.rmSync(req.file.path, { force: true }); console.error(err); res.status(500).json({ error: 'Could not save that file' }); }
@@ -217,7 +225,7 @@ function serveFile(req, res, file) {
 app.get('/api/shared/:share', (req, res) => {
   const file = sharedFile(req);
   if (!file) return res.status(404).json({ error: 'This link has expired or the file was deleted' });
-  res.json({ name: file.name, size: file.size, mime: file.mime, expires: file.expires });
+  res.json({ name: file.name, size: file.size, mime: file.mime, expires: file.expires, sender_name: file.sender_name });
 });
 app.get('/api/shared/:share/file', (req, res) => {
   const file = sharedFile(req);
