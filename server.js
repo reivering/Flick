@@ -114,7 +114,6 @@ app.get('/api/sessions/:id', (req, res) => {
   const files = db.prepare('SELECT id, session, name, size, mime, created, expires, sender_name FROM files WHERE session = ? AND expires > ? ORDER BY created DESC, rowid DESC').all(session.id, Date.now());
   res.json({ connected: !!session.connected, senderName: session.sender_name || 'Sending device', image: image || null, file: file || null, files });
 });
-const MAX_FILE_SIZE = 1000 * 1000 * 1000;
 const CHUNK_SIZE = 4 * 1024 * 1024;
 function fileMime(filePath) {
   const head = Buffer.alloc(16), fd = fs.openSync(filePath, 'r');
@@ -132,7 +131,7 @@ function fileMime(filePath) {
 app.post('/api/sessions/:id/uploads', (req, res) => {
   if (!getSession(req, 'sender')) return res.status(401).json({ error: 'Your connection has expired. Connect again' });
   const { name, size, fingerprint } = req.body;
-  if (typeof name !== 'string' || !name.length || !Number.isSafeInteger(size) || size < 0 || size >= MAX_FILE_SIZE || typeof fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(fingerprint)) return res.status(400).json({ error: 'Invalid file details' });
+  if (typeof name !== 'string' || !name.length || !Number.isSafeInteger(size) || size < 0 || typeof fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(fingerprint)) return res.status(400).json({ error: 'Invalid file details' });
   const safeName = path.basename(name).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 255) || 'file';
   let item = db.prepare('SELECT * FROM uploads WHERE session = ? AND fingerprint = ? AND size = ? AND name = ? AND expires > ?').get(req.params.id, fingerprint, size, safeName, Date.now());
   if (!item) {
@@ -171,11 +170,11 @@ app.put('/api/sessions/:id/uploads/:upload', express.raw({ type: 'application/oc
   res.json({ id: item.id, offset: next, complete: false });
 });
 
-const upload = multer({ storage: multer.diskStorage({ destination: filesDir, filename: (req, file, cb) => cb(null, token()) }), limits: { fileSize: MAX_FILE_SIZE, files: 1 } });
+const upload = multer({ storage: multer.diskStorage({ destination: filesDir, filename: (req, file, cb) => cb(null, token()) }), limits: { files: 1 } });
 app.post('/api/sessions/:id/files', (req, res) => {
   if (!getSession(req, 'sender')) return res.status(401).json({ error: 'Your connection has expired. Connect again' });
   upload.single('file')(req, res, err => {
-    if (err) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'Choose a file smaller than 1 GB' : 'Could not read that file' });
+    if (err) return res.status(400).json({ error: 'Could not read that file' });
     if (!req.file) return res.status(400).json({ error: 'Choose a file first' });
     try {
       const mime = fileMime(req.file.path);

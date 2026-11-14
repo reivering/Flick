@@ -164,7 +164,7 @@ Accounts, a gallery or transfer history, multi-file batches, video, physical pho
 
 ## File-sharing update
 
-Flick now shares one file at a time, smaller than 1 GB. Send and Receive use the same connection flow; supported images are previewed and other files are presented with their name and size. All files have a download action and expire after 24 hours. Show upload progress and keep the tap-to-send alternative to the swipe. Preserve files unchanged rather than converting images; filenames and content may contain personal information.
+Flick shares multiple files without a fixed per-file size limit. Send and Receive use the same connection flow; supported images are previewed and other files are presented with their name and size. All files have a download action and expire after 24 hours. Show upload progress and keep the tap-to-send alternative to the swipe. Preserve files unchanged rather than converting images; filenames and content may contain personal information.
 
 
 ## Current visual direction: monochrome

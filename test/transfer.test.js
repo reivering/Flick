@@ -60,6 +60,10 @@ test('resumable uploads recover offsets, keep files separate, preview PDFs and d
   const bytes = Buffer.from('%PDF-1.4 example content');
   const fingerprint = require('node:crypto').createHash('sha256').update(bytes).digest('hex');
   const details = {name:'document.pdf',size:bytes.length,fingerprint};
+  const large = await json(prefix + '/uploads', {...details, name:'large.bin', size: 2_000_000_000}, headers);
+  assert.equal(large.status, 200);
+  assert.equal((await large.json()).offset, 0);
+  assert.equal((await json(prefix + '/uploads', {...details, size: -1}, headers)).status, 400);
   const upload = await (await json(prefix + '/uploads', details, headers)).json();
   const put = (id, offset, body) => fetch(`${base}${prefix}/uploads/${id}`,{method:'PUT',headers:{...headers,'Content-Type':'application/octet-stream','Upload-Offset':String(offset)},body});
   assert.equal((await put(upload.id, 0, bytes.subarray(0, 6))).status, 200);

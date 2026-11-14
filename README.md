@@ -6,7 +6,7 @@ Choose **Receive** on one device, then scan its QR code or enter its eight-digit
 
 ## Features
 
-- Select or drag and drop multiple files, each smaller than 1 GB, with individual progress and a subtle flick animation
+- Select or drag and drop multiple files with individual progress and a subtle flick animation
 - Pair with a QR code or an eight-digit code, with one-click code copying
 - Give each device an optional name so senders and receivers can recognize each other
 - Preview JPEG, PNG, GIF, WebP, PDFs, and supported MP4, WebM, and Ogg videos; download files unchanged
