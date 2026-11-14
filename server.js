@@ -17,7 +17,9 @@ db.exec(`PRAGMA journal_mode=WAL; PRAGMA secure_delete=ON;
  CREATE TABLE IF NOT EXISTS images (id TEXT PRIMARY KEY, session TEXT, image BLOB, created INTEGER, expires INTEGER);
  CREATE INDEX IF NOT EXISTS image_expiry ON images(expires);
  CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, session TEXT, name TEXT, size INTEGER, mime TEXT, created INTEGER, expires INTEGER);
- CREATE INDEX IF NOT EXISTS file_expiry ON files(expires);`);
+ CREATE INDEX IF NOT EXISTS file_expiry ON files(expires);
+ CREATE TABLE IF NOT EXISTS uploads (id TEXT PRIMARY KEY, session TEXT, name TEXT, size INTEGER, fingerprint TEXT, created INTEGER, expires INTEGER);
+ CREATE INDEX IF NOT EXISTS upload_expiry ON uploads(expires);`);
 const DAY = 24 * 60 * 60 * 1000;
 const token = () => randomBytes(32).toString('base64url');
 const digest = value => createHash('sha256').update(value).digest('hex');
@@ -28,9 +30,13 @@ const cleanup = () => {
     try { fs.rmSync(path.join(filesDir, file.id), { force: true }); db.prepare('DELETE FROM files WHERE id = ?').run(file.id); }
     catch (err) { console.error('Could not delete expired file:', err.message); }
   }
+  for (const upload of db.prepare('SELECT id FROM uploads WHERE expires <= ?').all(now)) {
+    try { if (!db.prepare('SELECT 1 FROM files WHERE id = ?').get(upload.id)) fs.rmSync(path.join(filesDir, upload.id), { force: true }); db.prepare('DELETE FROM uploads WHERE id = ?').run(upload.id); }
+    catch (err) { console.error('Could not delete expired upload:', err.message); }
+  }
   for (const name of fs.readdirSync(filesDir)) {
     const file = path.join(filesDir, name);
-    if (!db.prepare('SELECT 1 FROM files WHERE id = ?').get(name) && fs.statSync(file).mtimeMs <= now - DAY) fs.rmSync(file, { force: true });
+    if (!db.prepare('SELECT 1 FROM files WHERE id = ?').get(name) && !db.prepare('SELECT 1 FROM uploads WHERE id = ?').get(name) && fs.statSync(file).mtimeMs <= now - DAY) fs.rmSync(file, { force: true });
   }
   db.prepare('DELETE FROM sessions WHERE expires <= ? AND id NOT IN (SELECT session FROM images) AND id NOT IN (SELECT session FROM files)').run(now);
   if (removed.changes) db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
@@ -43,6 +49,8 @@ app.disable('x-powered-by');
 app.use((req, res, next) => { res.set('Cache-Control', 'no-store'); res.set('X-Content-Type-Options', 'nosniff'); res.set('Referrer-Policy', 'no-referrer'); next(); });
 app.use(express.json({ limit: '4kb' }));
 app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
+app.use('/vendor/hashes', express.static(path.join(__dirname, 'node_modules', '@noble', 'hashes')));
+app.use('/vendor/pdfjs', express.static(path.join(__dirname, 'node_modules', 'pdfjs-dist', 'build')));
 const getSession = (req, role) => {
   const session = db.prepare('SELECT * FROM sessions WHERE id = ? AND expires > ?').get(req.params.id, Date.now());
   const auth = (req.get('Authorization') || '').replace(/^Bearer /, '');
@@ -72,7 +80,7 @@ app.post('/api/join', (req, res) => {
   if (!session) return res.status(404).json({ error: 'That code is invalid or has expired' });
   const sender = token();
   db.prepare('UPDATE sessions SET sender = ?, connected = 1 WHERE id = ?').run(digest(sender), session.id);
-  res.json({ id: session.id, sender });
+  res.json({ id: session.id, sender, code });
 });
 app.get('/api/history', (req, res) => {
   const now = Date.now();
@@ -93,10 +101,66 @@ app.get('/api/sessions/:id', (req, res) => {
   const receiver = req.get('Authorization').slice(7);
   res.cookie('flick_' + session.id, receiver, { httpOnly: true, sameSite: 'strict', secure: req.secure, maxAge: DAY });
   const image = db.prepare('SELECT id, created, expires FROM images WHERE session = ? AND expires > ? ORDER BY created DESC LIMIT 1').get(session.id, Date.now());
-  const file = db.prepare('SELECT id, name, size, mime, created, expires FROM files WHERE session = ? AND expires > ? ORDER BY created DESC LIMIT 1').get(session.id, Date.now());
-  res.json({ connected: !!session.connected, image: image || null, file: file || null });
+  const file = db.prepare('SELECT id, name, size, mime, created, expires FROM files WHERE session = ? AND expires > ? ORDER BY created DESC, rowid DESC LIMIT 1').get(session.id, Date.now());
+  const files = db.prepare('SELECT id, session, name, size, mime, created, expires FROM files WHERE session = ? AND expires > ? ORDER BY created DESC, rowid DESC').all(session.id, Date.now());
+  res.json({ connected: !!session.connected, image: image || null, file: file || null, files });
 });
 const MAX_FILE_SIZE = 1000 * 1000 * 1000;
+const CHUNK_SIZE = 4 * 1024 * 1024;
+function fileMime(filePath) {
+  const head = Buffer.alloc(16), fd = fs.openSync(filePath, 'r');
+  try { fs.readSync(fd, head, 0, head.length, 0); } finally { fs.closeSync(fd); }
+  if (head.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) return 'image/png';
+  if (head.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex'))) return 'image/jpeg';
+  if (['GIF87a', 'GIF89a'].includes(head.subarray(0, 6).toString())) return 'image/gif';
+  if (head.subarray(0, 4).toString() === 'RIFF' && head.subarray(8, 12).toString() === 'WEBP') return 'image/webp';
+  if (head.subarray(0, 5).toString() === '%PDF-') return 'application/pdf';
+  if (head.subarray(4, 8).toString() === 'ftyp') return 'video/mp4';
+  if (head.subarray(0, 4).equals(Buffer.from('1a45dfa3', 'hex'))) return 'video/webm';
+  if (head.subarray(0, 4).toString() === 'OggS') return 'video/ogg';
+  return null;
+}
+app.post('/api/sessions/:id/uploads', (req, res) => {
+  if (!getSession(req, 'sender')) return res.status(401).json({ error: 'Your connection has expired. Connect again' });
+  const { name, size, fingerprint } = req.body;
+  if (typeof name !== 'string' || !name.length || !Number.isSafeInteger(size) || size < 0 || size >= MAX_FILE_SIZE || typeof fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(fingerprint)) return res.status(400).json({ error: 'Invalid file details' });
+  const safeName = path.basename(name).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 255) || 'file';
+  let item = db.prepare('SELECT * FROM uploads WHERE session = ? AND fingerprint = ? AND size = ? AND name = ? AND expires > ?').get(req.params.id, fingerprint, size, safeName, Date.now());
+  if (!item) {
+    const id = token(), now = Date.now();
+    fs.writeFileSync(path.join(filesDir, id), '', { flag: 'wx' });
+    db.prepare('INSERT INTO uploads VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, req.params.id, safeName, size, fingerprint, now, now + DAY);
+    item = { id, size };
+  }
+  const offset = fs.statSync(path.join(filesDir, item.id)).size;
+  db.prepare('UPDATE sessions SET expires = ? WHERE id = ?').run(Date.now() + DAY, req.params.id);
+  const complete = !!db.prepare('SELECT 1 FROM files WHERE id = ? AND expires > ?').get(item.id, Date.now());
+  res.json({ id: item.id, offset, chunkSize: CHUNK_SIZE, complete });
+});
+app.put('/api/sessions/:id/uploads/:upload', express.raw({ type: 'application/octet-stream', limit: CHUNK_SIZE }), (req, res) => {
+  if (!getSession(req, 'sender')) return res.status(401).json({ error: 'Your connection has expired. Connect again' });
+  const item = db.prepare('SELECT * FROM uploads WHERE id = ? AND session = ? AND expires > ?').get(req.params.upload, req.params.id, Date.now());
+  if (!item) return res.status(404).json({ error: 'Upload expired. Start it again' });
+  if (db.prepare('SELECT 1 FROM files WHERE id = ? AND expires > ?').get(item.id, Date.now())) return res.json({ id: item.id, offset: item.size, complete: true });
+  const filePath = path.join(filesDir, item.id), offset = fs.statSync(filePath).size, requested = Number(req.get('Upload-Offset'));
+  if (!Number.isSafeInteger(requested) || requested !== offset) return res.status(409).json({ error: 'Upload position changed', offset });
+  if (!Buffer.isBuffer(req.body) || req.body.length > CHUNK_SIZE || offset + req.body.length > item.size || (!req.body.length && offset !== item.size)) return res.status(400).json({ error: 'Invalid upload chunk' });
+  fs.appendFileSync(filePath, req.body);
+  const next = offset + req.body.length;
+  if (next === item.size) {
+    const now = Date.now();
+    db.exec('BEGIN');
+    try {
+      db.prepare('INSERT INTO files VALUES (?, ?, ?, ?, ?, ?, ?)').run(item.id, item.session, item.name, item.size, fileMime(filePath), now, now + DAY);
+      db.prepare('UPDATE uploads SET expires = ? WHERE id = ?').run(now + DAY, item.id);
+      db.prepare('UPDATE sessions SET expires = ? WHERE id = ?').run(now + DAY, item.session);
+      db.exec('COMMIT');
+    } catch (err) { db.exec('ROLLBACK'); throw err; }
+    return res.json({ id: item.id, offset: next, complete: true });
+  }
+  res.json({ id: item.id, offset: next, complete: false });
+});
+
 const upload = multer({ storage: multer.diskStorage({ destination: filesDir, filename: (req, file, cb) => cb(null, token()) }), limits: { fileSize: MAX_FILE_SIZE, files: 1 } });
 app.post('/api/sessions/:id/files', (req, res) => {
   if (!getSession(req, 'sender')) return res.status(401).json({ error: 'Your connection has expired. Connect again' });
@@ -104,12 +168,7 @@ app.post('/api/sessions/:id/files', (req, res) => {
     if (err) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'Choose a file smaller than 1 GB' : 'Could not read that file' });
     if (!req.file) return res.status(400).json({ error: 'Choose a file first' });
     try {
-      const head = Buffer.alloc(12), fd = fs.openSync(req.file.path, 'r');
-      try { fs.readSync(fd, head, 0, 12, 0); } finally { fs.closeSync(fd); }
-      const mime = head.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')) ? 'image/png' :
-        head.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex')) ? 'image/jpeg' :
-        head.subarray(0, 6).toString() === 'GIF87a' || head.subarray(0, 6).toString() === 'GIF89a' ? 'image/gif' :
-        head.subarray(0, 4).toString() === 'RIFF' && head.subarray(8, 12).toString() === 'WEBP' ? 'image/webp' : null;
+      const mime = fileMime(req.file.path);
       const now = Date.now(), name = path.basename(req.file.originalname).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 255) || 'file';
       db.prepare('INSERT INTO files VALUES (?, ?, ?, ?, ?, ?, ?)').run(req.file.filename, req.params.id, name, req.file.size, mime, now, now + DAY);
       db.prepare('UPDATE sessions SET expires = ? WHERE id = ?').run(now + DAY, req.params.id);
@@ -117,12 +176,23 @@ app.post('/api/sessions/:id/files', (req, res) => {
     } catch (err) { fs.rmSync(req.file.path, { force: true }); console.error(err); res.status(500).json({ error: 'Could not save that file' }); }
   });
 });
-app.get('/api/sessions/:id/files/:file', (req, res) => {
+function receiverAllowed(req) {
   const cookie = (req.get('Cookie') || '').split('; ').find(value => value.startsWith('flick_' + req.params.id + '='));
   const receiver = cookie && cookie.slice(cookie.indexOf('=') + 1);
   const session = db.prepare('SELECT receiver FROM sessions WHERE id = ? AND expires > ?').get(req.params.id, Date.now());
-  const authorized = getSession(req, 'receiver') || (session && receiver && session.receiver === digest(receiver));
-  if (!authorized) return res.status(404).end();
+  return getSession(req, 'receiver') || (session && receiver && session.receiver === digest(receiver));
+}
+app.delete('/api/sessions/:id/files/:file', (req, res) => {
+  if (!receiverAllowed(req) || req.get('X-Flick-Request') !== '1') return res.status(404).end();
+  const file = db.prepare('SELECT id FROM files WHERE id = ? AND session = ? AND expires > ?').get(req.params.file, req.params.id, Date.now());
+  if (!file) return res.status(404).json({ error: 'This file is no longer available' });
+  fs.rmSync(path.join(filesDir, file.id), { force: true });
+  db.prepare('DELETE FROM files WHERE id = ?').run(file.id);
+  db.prepare('DELETE FROM uploads WHERE id = ?').run(file.id);
+  res.json({ deleted: true });
+});
+app.get('/api/sessions/:id/files/:file', (req, res) => {
+  if (!receiverAllowed(req)) return res.status(404).end();
   const file = db.prepare('SELECT * FROM files WHERE id = ? AND session = ? AND expires > ?').get(req.params.file, req.params.id, Date.now());
   if (!file) return res.status(404).end();
   res.set('Content-Security-Policy', "default-src 'none'; sandbox");

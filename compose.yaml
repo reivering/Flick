@@ -1,0 +1,11 @@
+services:
+  flick:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - flick-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  flick-data:
