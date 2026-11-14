@@ -1,0 +1,29 @@
+{
+  "name": "flick",
+  "version": "1.0.0",
+  "description": "Share files between devices from a browser",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "keywords": [
+    "file-sharing",
+    "qr-code",
+    "self-hosted"
+  ],
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^5.3.0",
+    "multer": "^2.5.0",
+    "qrcode": "^1.5.4"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/reivering/Flick.git"
+  }
+}
