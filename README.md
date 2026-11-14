@@ -6,8 +6,8 @@ Choose **Receive** on one device, then scan its QR code or enter its eight-digit
 
 ## Features
 
-- Share multiple files at once, each smaller than 1 GB, with individual progress
-- Pair with a QR code or an eight-digit code
+- Share multiple files at once, each smaller than 1 GB, with individual progress and a subtle flick animation
+- Pair with a QR code or an eight-digit code, with one-click code copying
 - Preview JPEG, PNG, GIF, WebP, PDFs, and supported MP4, WebM, and Ogg videos; download files unchanged
 - Reopen received files from the file icon in the same browser, until they expire
 - Resume interrupted uploads by retrying or reselecting the same files in the same browser tab
