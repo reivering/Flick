@@ -11,6 +11,7 @@ Choose **Receive** on one device, then scan its QR code or enter its eight-digit
 - Preview JPEG, PNG, GIF, WebP, PDFs, and supported MP4, WebM, and Ogg videos; download files unchanged
 - Reopen received files from the file icon in the same browser, until they expire
 - Resume interrupted uploads by retrying or reselecting the same files in the same browser tab
+- Create a share link for a received file, valid until the file expires or is deleted
 - Delete received files early or let them expire automatically after 24 hours
 
 ## Getting started
@@ -75,6 +76,8 @@ The server binds to all network interfaces. Protect the data directory from othe
 ## How storage and expiry work
 
 Uploads are split into 4 MiB chunks, and a full-file SHA-256 fingerprint identifies an interrupted upload. After a refresh, choose the same files in the same tab to resume; unfinished uploads expire after 24 hours. Each file is processed in turn. Files are stored unchanged in the data directory; their metadata and connection sessions are held in SQLite. Access expires 24 hours after upload. While the server is running, it checks for expired files once a minute and removes the stored file and its database record. It also checks at startup, so if the server was offline at expiry, physical deletion happens after it restarts. Any backups need their own deletion policy. Downloaded copies remain on the recipient's device.
+
+To share a file again, open it from received-file history and choose **Share link**. Anyone with the link can open or download that file until it is deleted or expires. On a local installation, recipients must be able to reach the running server on your network; a `localhost` link works only on the same device. Open Flick using its network address before creating a link for another device.
 
 Received-file history is tied to session cookies in the receiving browser. Clearing those cookies or changing browsers removes access to that history. Files received on other devices do not appear there.
 

@@ -19,12 +19,15 @@ db.exec(`PRAGMA journal_mode=WAL; PRAGMA secure_delete=ON;
  CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, session TEXT, name TEXT, size INTEGER, mime TEXT, created INTEGER, expires INTEGER);
  CREATE INDEX IF NOT EXISTS file_expiry ON files(expires);
  CREATE TABLE IF NOT EXISTS uploads (id TEXT PRIMARY KEY, session TEXT, name TEXT, size INTEGER, fingerprint TEXT, created INTEGER, expires INTEGER);
- CREATE INDEX IF NOT EXISTS upload_expiry ON uploads(expires);`);
+ CREATE INDEX IF NOT EXISTS upload_expiry ON uploads(expires);
+ CREATE TABLE IF NOT EXISTS shares (token_hash TEXT PRIMARY KEY, file_id TEXT NOT NULL, expires INTEGER NOT NULL);
+ CREATE INDEX IF NOT EXISTS share_expiry ON shares(expires);`);
 const DAY = 24 * 60 * 60 * 1000;
 const token = () => randomBytes(32).toString('base64url');
 const digest = value => createHash('sha256').update(value).digest('hex');
 const cleanup = () => {
   const now = Date.now();
+  db.prepare('DELETE FROM shares WHERE expires <= ? OR file_id NOT IN (SELECT id FROM files)').run(now);
   const removed = db.prepare('DELETE FROM images WHERE expires <= ?').run(now);
   for (const file of db.prepare('SELECT id FROM files WHERE expires <= ?').all(now)) {
     try { fs.rmSync(path.join(filesDir, file.id), { force: true }); db.prepare('DELETE FROM files WHERE id = ?').run(file.id); }
@@ -189,16 +192,43 @@ app.delete('/api/sessions/:id/files/:file', (req, res) => {
   fs.rmSync(path.join(filesDir, file.id), { force: true });
   db.prepare('DELETE FROM files WHERE id = ?').run(file.id);
   db.prepare('DELETE FROM uploads WHERE id = ?').run(file.id);
+  db.prepare('DELETE FROM shares WHERE file_id = ?').run(file.id);
   res.json({ deleted: true });
+});
+app.post('/api/sessions/:id/files/:file/share', (req, res) => {
+  if (!receiverAllowed(req) || req.get('X-Flick-Request') !== '1') return res.status(404).end();
+  const file = db.prepare('SELECT id, expires FROM files WHERE id = ? AND session = ? AND expires > ?').get(req.params.file, req.params.id, Date.now());
+  if (!file) return res.status(404).json({ error: 'This file is no longer available' });
+  const shareToken = token();
+  db.prepare('INSERT INTO shares VALUES (?, ?, ?)').run(digest(shareToken), file.id, file.expires);
+  res.json({ token: shareToken, expires: file.expires });
+});
+function sharedFile(req) {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(req.params.share)) return null;
+  const now = Date.now();
+  return db.prepare('SELECT files.* FROM shares JOIN files ON files.id = shares.file_id WHERE shares.token_hash = ? AND shares.expires > ? AND files.expires > ?').get(digest(req.params.share), now, now);
+}
+function serveFile(req, res, file) {
+  res.set('Content-Security-Policy', "default-src 'none'; sandbox");
+  if (req.query.preview === '1' && file.mime) { res.type(file.mime); return res.sendFile(path.join(filesDir, file.id)); }
+  res.type('application/octet-stream');
+  res.download(path.join(filesDir, file.id), file.name, err => { if (err && !res.headersSent) res.status(404).end(); });
+}
+app.get('/api/shared/:share', (req, res) => {
+  const file = sharedFile(req);
+  if (!file) return res.status(404).json({ error: 'This link has expired or the file was deleted' });
+  res.json({ name: file.name, size: file.size, mime: file.mime, expires: file.expires });
+});
+app.get('/api/shared/:share/file', (req, res) => {
+  const file = sharedFile(req);
+  if (!file) return res.status(404).end();
+  serveFile(req, res, file);
 });
 app.get('/api/sessions/:id/files/:file', (req, res) => {
   if (!receiverAllowed(req)) return res.status(404).end();
   const file = db.prepare('SELECT * FROM files WHERE id = ? AND session = ? AND expires > ?').get(req.params.file, req.params.id, Date.now());
   if (!file) return res.status(404).end();
-  res.set('Content-Security-Policy', "default-src 'none'; sandbox");
-  if (req.query.preview === '1' && file.mime) { res.type(file.mime); return res.sendFile(path.join(filesDir, file.id)); }
-  res.type('application/octet-stream');
-  res.download(path.join(filesDir, file.id), file.name, err => { if (err && !res.headersSent) res.status(404).end(); });
+  serveFile(req, res, file);
 });
 app.get('/api/sessions/:id/images/:image', (req, res) => {
   if (!getSession(req, 'receiver')) return res.status(404).end();
