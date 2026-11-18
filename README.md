@@ -1,5 +1,9 @@
 # Flick
 
+[![Watch the Flick demo](docs/media/flick-poster.jpg)](https://github.com/reivering/Flick/raw/refs/heads/main/docs/media/flick-demo.mp4)
+
+[Watch the 20-second demo](https://github.com/reivering/Flick/raw/refs/heads/main/docs/media/flick-demo.mp4)
+
 Share a file between your phone and computer from a browser. No account or app installation required.
 
 Choose **Receive** on one device, then scan its QR code or enter its eight-digit code on the other device. Select one or more files and tap **Flick to send**, or swipe upward on the file list. The receiving device can view supported images and download the original file.
