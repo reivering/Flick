@@ -113,3 +113,28 @@ test('resumable uploads recover offsets, keep files separate, preview PDFs and d
   assert.equal(fs.existsSync(path.join(dir, 'files', unfinished.id)), false);
   assert.equal(fs.existsSync(path.join(dir, 'files', video.id)), true);
 });
+test('send links to a paired receiver, retain in history and delete or expire', async () => {
+  if (!server.listening) await new Promise(resolve => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const post = (url, body, headers = {}) => fetch(base + url, {method:'POST', headers:{'Content-Type':'application/json', ...headers}, body:JSON.stringify(body)});
+  const response = await post('/api/sessions', {origin:base});
+  const cookie = response.headers.get('set-cookie').split(';')[0], session = await response.json();
+  const sender = await (await post('/api/join', {code:session.code, senderName:'Phone'})).json();
+  const endpoint = `/api/sessions/${session.id}/links`, auth = {Authorization:`Bearer ${sender.sender}`};
+  assert.equal((await post(endpoint, {url:'https://example.com'})).status, 401);
+  for (const url of ['javascript:alert(1)', 'file:///etc/passwd', 'https://user:pass@example.com']) assert.equal((await post(endpoint, {url}, auth)).status, 400);
+  const sent = await (await post(endpoint, {url:'https://example.com/path?q=1'}, auth)).json();
+  assert.ok(sent.expires > Date.now() + 23 * 60 * 60 * 1000);
+  const state = await (await fetch(`${base}/api/sessions/${session.id}`, {headers:{Authorization:`Bearer ${session.receiver}`}})).json();
+  assert.equal(state.file.link_url, 'https://example.com/path?q=1');
+  assert.equal(state.file.sender_name, 'Phone');
+  assert.equal((await (await fetch(base + '/api/history', {headers:{Cookie:cookie}})).json()).files[0].link_url, state.file.link_url);
+  const item = `${base}/api/sessions/${session.id}/files/${sent.id}`;
+  assert.equal((await fetch(item, {headers:{Cookie:cookie}})).status, 404);
+  assert.equal((await fetch(item, {method:'DELETE',headers:{Cookie:cookie,'X-Flick-Request':'1'}})).status, 200);
+  assert.equal((await (await fetch(base + '/api/history', {headers:{Cookie:cookie}})).json()).files.length, 0);
+  const expired = await (await post(endpoint, {url:'https://example.com'}, auth)).json();
+  db.prepare('UPDATE files SET expires = ? WHERE id = ?').run(Date.now() - 1, expired.id);
+  cleanup();
+  assert.equal(db.prepare('SELECT id FROM files WHERE id = ?').get(expired.id), undefined);
+});

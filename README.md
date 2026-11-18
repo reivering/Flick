@@ -6,6 +6,7 @@ Choose **Receive** on one device, then scan its QR code or enter its eight-digit
 
 ## Features
 
+- Send HTTP and HTTPS links between connected devices; received links can be opened from history for 24 hours
 - Select or drag and drop multiple files with individual progress and a subtle flick animation
 - Pair with a QR code or an eight-digit code, with one-click code copying
 - Give each device an optional name so senders and receivers can recognize each other

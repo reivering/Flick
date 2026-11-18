@@ -22,7 +22,7 @@ db.exec(`PRAGMA journal_mode=WAL; PRAGMA secure_delete=ON;
  CREATE INDEX IF NOT EXISTS upload_expiry ON uploads(expires);
  CREATE TABLE IF NOT EXISTS shares (token_hash TEXT PRIMARY KEY, file_id TEXT NOT NULL, expires INTEGER NOT NULL);
  CREATE INDEX IF NOT EXISTS share_expiry ON shares(expires);`);
-for (const [table, column] of [['sessions', 'receiver_name'], ['sessions', 'sender_name'], ['files', 'sender_name']]) {
+for (const [table, column] of [['sessions', 'receiver_name'], ['sessions', 'sender_name'], ['files', 'sender_name'], ['files', 'link_url']]) {
   if (!db.prepare(`PRAGMA table_info(${table})`).all().some(field => field.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`);
 }
 const DAY = 24 * 60 * 60 * 1000;
@@ -99,7 +99,7 @@ app.get('/api/history', (req, res) => {
     if (!match) continue;
     const session = db.prepare('SELECT receiver FROM sessions WHERE id = ? AND expires > ?').get(match[1], now);
     if (!session || session.receiver !== digest(match[2])) continue;
-    files.push(...db.prepare('SELECT id, session, name, size, mime, created, expires, sender_name FROM files WHERE session = ? AND expires > ?').all(match[1], now));
+    files.push(...db.prepare('SELECT id, session, name, size, mime, created, expires, sender_name, link_url FROM files WHERE session = ? AND expires > ?').all(match[1], now));
   }
   files.sort((a, b) => b.created - a.created);
   res.json({ files });
@@ -110,9 +110,23 @@ app.get('/api/sessions/:id', (req, res) => {
   const receiver = req.get('Authorization').slice(7);
   res.cookie('flick_' + session.id, receiver, { httpOnly: true, sameSite: 'strict', secure: req.secure, maxAge: DAY });
   const image = db.prepare('SELECT id, created, expires FROM images WHERE session = ? AND expires > ? ORDER BY created DESC LIMIT 1').get(session.id, Date.now());
-  const file = db.prepare('SELECT id, name, size, mime, created, expires, sender_name FROM files WHERE session = ? AND expires > ? ORDER BY created DESC, rowid DESC LIMIT 1').get(session.id, Date.now());
-  const files = db.prepare('SELECT id, session, name, size, mime, created, expires, sender_name FROM files WHERE session = ? AND expires > ? ORDER BY created DESC, rowid DESC').all(session.id, Date.now());
+  const file = db.prepare('SELECT id, name, size, mime, created, expires, sender_name, link_url FROM files WHERE session = ? AND expires > ? ORDER BY created DESC, rowid DESC LIMIT 1').get(session.id, Date.now());
+  const files = db.prepare('SELECT id, session, name, size, mime, created, expires, sender_name, link_url FROM files WHERE session = ? AND expires > ? ORDER BY created DESC, rowid DESC').all(session.id, Date.now());
   res.json({ connected: !!session.connected, senderName: session.sender_name || 'Sending device', image: image || null, file: file || null, files });
+});
+app.post('/api/sessions/:id/links', (req, res) => {
+  const session = getSession(req, 'sender');
+  if (!session) return res.status(401).json({ error: 'Your connection has expired. Connect again' });
+  let url;
+  try {
+    if (typeof req.body.url !== 'string' || req.body.url.length > 2048) throw new Error();
+    url = new URL(req.body.url);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error();
+  } catch { return res.status(400).json({ error: 'Enter a valid HTTP or HTTPS link' }); }
+  const id = token(), now = Date.now(), link = url.href;
+  db.prepare('INSERT INTO files (id, session, name, size, created, expires, sender_name, link_url) VALUES (?, ?, ?, 0, ?, ?, ?, ?)').run(id, session.id, link, now, now + DAY, session.sender_name || 'Sending device', link);
+  db.prepare('UPDATE sessions SET expires = ? WHERE id = ?').run(now + DAY, session.id);
+  res.json({ id, expires: now + DAY });
 });
 const CHUNK_SIZE = 4 * 1024 * 1024;
 function fileMime(filePath) {
@@ -204,7 +218,7 @@ app.delete('/api/sessions/:id/files/:file', (req, res) => {
 });
 app.post('/api/sessions/:id/files/:file/share', (req, res) => {
   if (!receiverAllowed(req) || req.get('X-Flick-Request') !== '1') return res.status(404).end();
-  const file = db.prepare('SELECT id, expires FROM files WHERE id = ? AND session = ? AND expires > ?').get(req.params.file, req.params.id, Date.now());
+  const file = db.prepare('SELECT id, expires FROM files WHERE id = ? AND session = ? AND expires > ? AND link_url IS NULL').get(req.params.file, req.params.id, Date.now());
   if (!file) return res.status(404).json({ error: 'This file is no longer available' });
   const shareToken = token();
   db.prepare('INSERT INTO shares VALUES (?, ?, ?)').run(digest(shareToken), file.id, file.expires);
@@ -234,7 +248,7 @@ app.get('/api/shared/:share/file', (req, res) => {
 app.get('/api/sessions/:id/files/:file', (req, res) => {
   if (!receiverAllowed(req)) return res.status(404).end();
   const file = db.prepare('SELECT * FROM files WHERE id = ? AND session = ? AND expires > ?').get(req.params.file, req.params.id, Date.now());
-  if (!file) return res.status(404).end();
+  if (!file || file.link_url) return res.status(404).end();
   serveFile(req, res, file);
 });
 app.get('/api/sessions/:id/images/:image', (req, res) => {
