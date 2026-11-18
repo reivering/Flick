@@ -1,8 +1,6 @@
 # Flick
 
-[![Watch the Flick demo](docs/media/flick-poster.jpg)](https://github.com/reivering/Flick/raw/refs/heads/main/docs/media/flick-demo.mp4)
-
-[Watch the 20-second demo](https://github.com/reivering/Flick/raw/refs/heads/main/docs/media/flick-demo.mp4)
+https://github.com/user-attachments/assets/9f146b0a-a495-4d05-af93-edf694bd5af2
 
 Share a file between your phone and computer from a browser. No account or app installation required.
 
